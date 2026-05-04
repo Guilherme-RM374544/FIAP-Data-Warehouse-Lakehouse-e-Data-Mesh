@@ -52,6 +52,228 @@ A fórmula contratual da receita líquida, herdada do benchmark TPC-H, é `l_ext
 | **B** — Star Schema SCD1 | `dw_star` | Fato + dimensões; `dim_customer` guarda segmento **atual** |
 | **C** — Star Schema SCD2 | `dw_star_scd2` | Mesmo do B, mas `dim_customer` preserva **histórico** de segmento |
 
+### Modelo de dados comparado — ao nível de tabelas, colunas e relacionamentos
+
+Os três diagramas abaixo mostram **exatamente o mesmo dado físico** representado de formas diferentes. Observe que:
+
+- Na **Modelagem A**, não existe fato nem dimensão — só 8 tabelas relacionais espelhando o OLTP. A lógica analítica é inteiramente construída na query.
+- Nas **Modelagens B e C**, os conceitos `FATO` e `DIMENSÃO` aparecem explicitamente (anotados nos diagramas). A fato concentra medidas; as dimensões concentram contexto descritivo.
+- A diferença entre B e C está **em uma única tabela**: `dim_customer`. No B ela tem 150k linhas (SCD1); no C tem ~157k linhas versionadas (SCD2) com colunas temporais.
+
+#### Modelagem A · `oltp_mirror` (relacional, sem distinção fato/dimensão)
+
+```mermaid
+erDiagram
+    region {
+        int r_regionkey PK
+        varchar r_name
+    }
+    nation {
+        int n_nationkey PK
+        int n_regionkey FK
+        varchar n_name
+    }
+    customer {
+        bigint c_custkey PK
+        int c_nationkey FK
+        varchar c_name
+        varchar c_mktsegment "segmento ATUAL (sobrescrito)"
+        decimal c_acctbal
+    }
+    supplier {
+        bigint s_suppkey PK
+        int s_nationkey FK
+        varchar s_name
+        decimal s_acctbal
+    }
+    part {
+        bigint p_partkey PK
+        varchar p_name
+        varchar p_brand
+        varchar p_type
+        decimal p_retailprice
+    }
+    partsupp {
+        bigint ps_partkey PK,FK
+        bigint ps_suppkey PK,FK
+        decimal ps_supplycost
+        int ps_availqty
+    }
+    orders {
+        bigint o_orderkey PK
+        bigint o_custkey FK
+        date o_orderdate
+        decimal o_totalprice
+        char o_orderstatus
+    }
+    lineitem {
+        bigint l_orderkey PK,FK
+        int l_linenumber PK
+        bigint l_partkey FK
+        bigint l_suppkey FK
+        decimal l_quantity
+        decimal l_extendedprice
+        decimal l_discount
+        decimal l_tax
+        date l_shipdate
+    }
+
+    region  ||--o{ nation    : "tem"
+    nation  ||--o{ customer  : "localiza"
+    nation  ||--o{ supplier  : "localiza"
+    customer ||--o{ orders   : "faz"
+    orders  ||--o{ lineitem  : "contém"
+    part    ||--o{ lineitem  : "é vendido em"
+    supplier ||--o{ lineitem : "fornece em"
+    part    ||--o{ partsupp  : "tem oferta"
+    supplier ||--o{ partsupp : "oferece"
+```
+
+> [!NOTE]
+> **Nenhuma tabela é "fato" aqui.** A query da Modelagem A precisa juntar 5 tabelas e aplicar filtros em colunas espalhadas (data em `orders`, segmento em `customer`, região em `region`). Isso funciona para poucas consultas, mas expõe o usuário ao modelo operacional inteiro.
+
+#### Modelagem B · `dw_star` (Star Schema com SCD Tipo 1)
+
+```mermaid
+erDiagram
+    dim_data {
+        int data_sk PK "surrogate YYYYMMDD"
+        date dt_completa
+        smallint nr_ano
+        smallint nr_trimestre
+        smallint nr_mes
+        varchar nm_mes
+        boolean fl_fim_de_semana
+    }
+    dim_customer {
+        bigint customer_sk PK "surrogate"
+        bigint c_custkey "chave natural"
+        varchar nm_cliente
+        varchar sg_segmento "SCD1: segmento ATUAL"
+        decimal vl_saldo
+    }
+    dim_produto {
+        bigint produto_sk PK
+        bigint p_partkey
+        varchar nm_produto
+        varchar nm_marca
+        varchar ds_tipo
+        decimal vl_preco_varejo
+    }
+    dim_supplier {
+        bigint supplier_sk PK
+        bigint s_suppkey
+        varchar nm_fornecedor
+        decimal vl_saldo
+    }
+    dim_geografia {
+        int geografia_sk PK "achata nation+region"
+        varchar nm_nacao
+        varchar nm_regiao
+    }
+    f_vendas {
+        int data_sk FK
+        bigint customer_sk FK
+        bigint produto_sk FK
+        bigint supplier_sk FK
+        int geografia_sk FK
+        bigint nr_pedido "dim degenerada"
+        int nr_linha_pedido "dim degenerada"
+        decimal qt_vendida "medida aditiva"
+        decimal vl_preco_estendido "medida"
+        decimal vl_desconto_pct "medida não-aditiva"
+        decimal vl_receita_liquida "medida derivada materializada"
+    }
+
+    dim_data      ||--o{ f_vendas : "quando"
+    dim_customer  ||--o{ f_vendas : "quem comprou"
+    dim_produto   ||--o{ f_vendas : "o quê"
+    dim_supplier  ||--o{ f_vendas : "quem forneceu"
+    dim_geografia ||--o{ f_vendas : "de onde é o cliente"
+```
+
+> [!IMPORTANT]
+> **`f_vendas` é a FATO** (centro da estrela). As demais são **DIMENSÕES** (pontas da estrela). Grain declarado: *uma linha = um item (`l_linenumber`) de um pedido (`l_orderkey`)*.
+>
+> - **Surrogate keys** (`_sk`) isolam o warehouse de mudanças nas chaves naturais.
+> - **Medidas** ficam na fato (`qt_vendida`, `vl_receita_liquida`). **Atributos** ficam nas dimensões (`sg_segmento`, `nm_marca`, `nm_regiao`).
+> - `dim_geografia` **achata** `nation + region` (star clássico; evita snowflake).
+> - `vl_receita_liquida` está **materializada** na fato (contrato explícito da fórmula TPC-H).
+
+#### Modelagem C · `dw_star_scd2` (Star Schema com SCD Tipo 2)
+
+```mermaid
+erDiagram
+    dim_customer_v2 {
+        bigint customer_sk PK "versão do cliente"
+        bigint c_custkey "chave natural (não única)"
+        varchar nm_cliente
+        varchar sg_segmento "segmento da ÉPOCA"
+        decimal vl_saldo
+        date valid_from "início da vigência"
+        date valid_to "fim da vigência"
+        boolean is_current "flag versão atual"
+    }
+    f_vendas_scd2 {
+        int data_sk FK
+        bigint customer_sk FK "versão vigente na data"
+        bigint produto_sk FK
+        bigint supplier_sk FK
+        int geografia_sk FK
+        decimal vl_receita_liquida
+    }
+    dim_data_reuso {
+        int data_sk PK "(reusa do dw_star)"
+    }
+    dim_produto_reuso {
+        bigint produto_sk PK "(reusa do dw_star)"
+    }
+    dim_supplier_reuso {
+        bigint supplier_sk PK "(reusa do dw_star)"
+    }
+    dim_geografia_reuso {
+        int geografia_sk PK "(reusa do dw_star)"
+    }
+
+    dim_customer_v2     ||--o{ f_vendas_scd2 : "join temporal por valid_from/valid_to"
+    dim_data_reuso      ||--o{ f_vendas_scd2 : "quando"
+    dim_produto_reuso   ||--o{ f_vendas_scd2 : "o quê"
+    dim_supplier_reuso  ||--o{ f_vendas_scd2 : "quem forneceu"
+    dim_geografia_reuso ||--o{ f_vendas_scd2 : "de onde"
+```
+
+> [!IMPORTANT]
+> **A única diferença estrutural para a Modelagem B** é que `dim_customer` agora pode ter **múltiplas linhas por cliente** — uma por período de vigência do segmento. A chave natural `c_custkey` **deixa de ser única** na dimensão; o `customer_sk` identifica a **versão** (não a entidade).
+>
+> O join da fato com a dimensão passa a carregar um predicado temporal:
+>
+> ```sql
+> JOIN dim_customer_v2 c
+>   ON c.c_custkey = o.o_custkey
+>  AND o.o_orderdate BETWEEN c.valid_from AND c.valid_to
+> ```
+>
+> As outras 4 dimensões (`dim_data`, `dim_produto`, `dim_supplier`, `dim_geografia`) são **reaproveitadas** do `dw_star` — aqui estão marcadas como `*_reuso` apenas para deixar a origem visível.
+
+#### Resumindo o que mudou entre as 3 modelagens
+
+```mermaid
+flowchart LR
+    A["Modelagem A<br/>oltp_mirror<br/><br/>8 tabelas relacionais<br/>sem fato/dim<br/>segmento = ATUAL"]
+    B["Modelagem B<br/>dw_star<br/><br/>f_vendas + 5 dimensões<br/>SCD Tipo 1<br/>segmento = ATUAL"]
+    C["Modelagem C<br/>dw_star_scd2<br/><br/>f_vendas + dim_customer_v2<br/>SCD Tipo 2<br/>segmento = VIGENTE NA DATA"]
+
+    A -->|"CTAS<br/>+ surrogate keys<br/>+ desnormalização"| B
+    B -->|"MERGE com<br/>customer_history<br/>+ valid_from/valid_to"| C
+
+    classDef oltp fill:#F5F6F8,stroke:#687078,color:#232F3E
+    classDef star fill:#EBF3FF,stroke:#146EB4,color:#0B4870
+    classDef scd2 fill:#FFECE8,stroke:#D13212,color:#7A1D0B
+    class A oltp
+    class B star
+    class C scd2
+```
+
 ---
 
 ## Parte 1 - Acessando o Redshift pelo Query Editor v2
