@@ -386,7 +386,7 @@ Ao final desta etapa, você estará conectado ao cluster Redshift pelo editor de
 3. Na caixa de autenticação, escolha **Database user name and password** e preencha:
    - Database: `dw_mba`
    - Username: `dwadmin`
-   - Password: o valor retornado por `terraform output -raw redshift_master_password` (no Codespaces, na pasta `01-provisionamento/`)
+   - Password: o valor retornado por `terraform output -raw redshift_master_password && echo` (no Codespaces, na pasta `01-provisionamento/`; o `&& echo` adiciona uma linha em branco depois da senha pra você não copiar o `$` do prompt junto)
 
 <!-- PRINT SUGERIDO: img/redshift_connection_form.png
      Caixa de autenticação preenchida (com a senha coberta/borrada).
