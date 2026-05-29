@@ -151,15 +151,15 @@ Como ler o diagrama:
 | Tarefa | O que você faz | Passos | Tempo |
 |--------|----------------|--------|-------|
 | [Tarefa 1](#tarefa-1---provisionamento-do-bucket-e-dataset) | Provisiona bucket S3 e gera os 3 CSVs | [1](#passo-1) · [2](#passo-2) · [3](#passo-3) | ~10 min |
-| [Tarefa 2](#tarefa-2---catalogar-no-glue-com-crawler) | Cria database e Glue Crawler; gera 3 tabelas raw | [4](#passo-4) · [5](#passo-5) · [6](#passo-6) · [7](#passo-7) | ~15 min |
-| [Tarefa 3](#tarefa-3---criar-tabelas-iceberg-vazias) | DDL Iceberg: `clientes_iceberg` + `pedidos_iceberg` | [8](#passo-8) · [9](#passo-9) · [10](#passo-10) | ~15 min |
-| [Tarefa 4](#tarefa-4---carregar-dados-iniciais) | `INSERT INTO ... SELECT` com `CAST(data_pedido AS DATE)` | [11](#passo-11) · [12](#passo-12) | ~15 min |
-| [Tarefa 5](#tarefa-5---adicionar-coluna-calculada-valor_final) | `ALTER TABLE` + `UPDATE` materializando `valor_final` | [13](#passo-13) · [14](#passo-14) · [15](#passo-15) | ~15 min |
-| [Tarefa 6](#tarefa-6---aplicar-delta-de-cdc-com-merge-into) | CTAS Iceberg do delta + `MERGE INTO` | [16](#passo-16) · [17](#passo-17) · [18](#passo-18) | ~25 min |
-| [Tarefa 7](#tarefa-7---otimizar-a-tabela) | `OPTIMIZE` (BIN_PACK) + `VACUUM` | [19](#passo-19) · [20](#passo-20) · [21](#passo-21) | ~15 min |
-| [Tarefa 8](#tarefa-8---entrega-da-query-executiva) | Top 5 clientes por receita líquida | [22](#passo-22) · [23](#passo-23) | ~10 min |
-| [Tarefa 9](#tarefa-9---escrever-decisionmd) | Defender a evolução técnica em ADR | [24](#passo-24) | ~30 min |
-| [Tarefa 10](#tarefa-10---limpeza) | Limpa S3 + Glue para preservar budget Learner Lab | [25](#passo-25) | ~5 min |
+| [Tarefa 2](#tarefa-2---catalogar-no-glue-com-crawler) | Roda script que cria database + crawler e valida 3 tabelas raw | [4](#passo-4) · [5](#passo-5) | ~5 min |
+| [Tarefa 3](#tarefa-3---criar-tabelas-iceberg-vazias) | DDL Iceberg: `clientes_iceberg` + `pedidos_iceberg` | [6](#passo-6) · [7](#passo-7) · [8](#passo-8) | ~15 min |
+| [Tarefa 4](#tarefa-4---carregar-dados-iniciais) | `INSERT INTO ... SELECT` com `CAST(data_pedido AS DATE)` | [9](#passo-9) · [10](#passo-10) | ~15 min |
+| [Tarefa 5](#tarefa-5---adicionar-coluna-calculada-valor_final) | `ALTER TABLE` + `UPDATE` materializando `valor_final` | [11](#passo-11) · [12](#passo-12) · [13](#passo-13) | ~15 min |
+| [Tarefa 6](#tarefa-6---aplicar-delta-de-cdc-com-merge-into) | CTAS Iceberg do delta + `MERGE INTO` | [14](#passo-14) · [15](#passo-15) · [16](#passo-16) | ~25 min |
+| [Tarefa 7](#tarefa-7---otimizar-a-tabela) | `OPTIMIZE` (BIN_PACK) + `VACUUM` | [17](#passo-17) · [18](#passo-18) · [19](#passo-19) | ~15 min |
+| [Tarefa 8](#tarefa-8---entrega-da-query-executiva) | Top 5 clientes por receita líquida | [20](#passo-20) · [21](#passo-21) | ~10 min |
+| [Tarefa 9](#tarefa-9---escrever-decisionmd) | Defender a evolução técnica em ADR | [22](#passo-22) | ~30 min |
+| [Tarefa 10](#tarefa-10---limpeza) | Limpa S3 + Glue para preservar budget Learner Lab | [23](#passo-23) | ~5 min |
 
 > [!TIP]
 > Se travou em algum passo, clique no número correspondente acima.
@@ -317,50 +317,75 @@ Athena não tem variáveis em SQL como `\set` no psql. Cada `LOCATION 's3://...'
 
 <a id="passo-5"></a>
 
-**5.** Acesse o [console do AWS Glue](https://us-east-1.console.aws.amazon.com/glue/home?region=us-east-1#/v2/data-catalog/databases) → **Databases** → **Add database** → nome: `trabalho_final_aluno`.
+**5.** Rode o script de setup do Glue Crawler. Ele cria o database `trabalho_final_aluno`, cria o crawler apontando para `s3://tf-aluno-<ACCOUNT_ID>/bruto/`, dispara a execução, **espera o crawler terminar** (~1-2 min) e **valida que as 3 tabelas vieram com os schemas esperados**:
 
-<a id="passo-6"></a>
+```bash
+cd /workspaces/FIAP-Data-Warehouse-Lakehouse-e-Data-Mesh/04-Trabalho-Final && \
+  bash scripts/setup_glue_crawler.sh
+```
 
-**6.** Vá em **Crawlers** → **Create crawler**:
+Saída esperada (final do log):
 
-- **Name**: `tf-aluno-crawler`
-- **Data source**: S3 path = `s3://tf-aluno-<ACCOUNT_ID>/bruto/` (substitua o seu)
-- **IAM role**: `LabRole`
-- **Target database**: `trabalho_final_aluno`
-- **Schedule**: On demand
-- **Crawler output**: deixe o default (não habilite "Update all new and existing partitions...")
+```
+[100%] Concluido com sucesso.
 
-Clique em **Run crawler** e aguarde ~1-2 minutos até o status mudar para `Ready`.
+  Database:    trabalho_final_aluno
+  Crawler:     crawler-trabalho-final-aluno (READY)
+  Tabelas:     clientes (7 cols), pedidos (8 cols), pedidos_delta (8 cols)
+```
 
 <details>
-<summary><b>⚠ Se der erro: o crawler termina mas não cria tabelas</b></summary>
+<summary><b>💡 Clique para entender: o que o script faz por baixo</b></summary>
 <blockquote>
 
-Causa típica: você apontou o S3 path para `s3://tf-aluno-<ACCOUNT_ID>/` (raiz do bucket) em vez de `s3://tf-aluno-<ACCOUNT_ID>/bruto/`. Edite o crawler, ajuste o path para `bruto/` e rode de novo.
+Em vez de você criar database + crawler manualmente no console (3-4 minutos com risco de errar prefixo S3, esquecer LabRole etc.), o script automatiza:
 
-Outra causa: o nome do bucket no path está errado (typo no account ID). Confira com `aws s3 ls | grep tf-aluno`.
+1. Valida credenciais e que o bucket existe
+2. `aws glue create-database` (idempotente)
+3. `aws glue create-crawler` apontando para `s3://tf-aluno-<ACCOUNT_ID>/bruto/` com role `LabRole`
+4. `aws glue start-crawler` e faz polling do estado a cada 10s até `READY`
+5. Lista as tabelas criadas e valida nomes (`clientes`, `pedidos`, `pedidos_delta`) e schemas (colunas em PT, sem `col0..col6` indicando header não detectado)
+
+Se algum check falhar, o script para com mensagem clara apontando o que aconteceu — e você (ou o professor olhando o log) sabe exatamente onde corrigir.
+
+Para conferir visualmente o resultado, abra o [console do AWS Glue](https://us-east-1.console.aws.amazon.com/glue/home?region=us-east-1#/v2/data-catalog/databases) → **Databases** → `trabalho_final_aluno` → **Tables**. Você verá as 3 tabelas. Em `pedidos`, `data_pedido` deve estar como `string` (o Crawler infere CSV como string por padrão — vamos converter para `DATE` na Tarefa 4); em `clientes`, `ano_nascimento` deve estar como `int`.
 
 </blockquote>
 </details>
 
-<a id="passo-7"></a>
+<details>
+<summary><b>⚠ Se der erro: <code>tabelas com nomes em ingles (customers/orders) detectadas</code></b></summary>
+<blockquote>
 
-**7.** No console Glue, abra **Databases** → `trabalho_final_aluno` → **Tables**. Você deve ver **3 tabelas**:
+Você rodou o `setup_aluno.sh` com uma versão antiga deste repo (em inglês). Limpe o bucket e rerrode o setup atual:
 
-| Tabela | Aponta para |
-|--------|-------------|
-| `clientes` | `s3://tf-aluno-<ACCOUNT_ID>/bruto/clientes/` |
-| `pedidos` | `s3://tf-aluno-<ACCOUNT_ID>/bruto/pedidos/` |
-| `pedidos_delta` | `s3://tf-aluno-<ACCOUNT_ID>/bruto/pedidos_delta/` |
+```bash
+aws s3 rm s3://tf-aluno-$(aws sts get-caller-identity --query Account --output text)/ --recursive
+cd /workspaces/FIAP-Data-Warehouse-Lakehouse-e-Data-Mesh/04-Trabalho-Final && \
+  bash scripts/setup_aluno.sh && \
+  bash scripts/setup_glue_crawler.sh
+```
 
-Clique em `pedidos` e confira o schema: `data_pedido` deve estar como **`string`** (o Crawler infere CSV como string por padrão — vamos converter para `DATE` na Tarefa 4). Em `clientes`, confirme que `ano_nascimento` foi detectado como `int` (a primeira coluna numérica do CSV é o que faz o Crawler reconhecer header automaticamente, sem classifier customizado).
+</blockquote>
+</details>
+
+<details>
+<summary><b>⚠ Se der erro: <code>Crawler nao terminou em 300s</code> ou <code>LastCrawl.Status != SUCCEEDED</code></b></summary>
+<blockquote>
+
+Causa típica: a role `LabRole` não tem permissão para ler algum prefixo, ou a estrutura do S3 mudou (CSVs ausentes/vazios). Investigue no [console Glue → Crawlers → `crawler-trabalho-final-aluno` → CloudWatch logs](https://us-east-1.console.aws.amazon.com/glue/home?region=us-east-1#/v2/etl-configuration/crawlers).
+
+Se for "no objects in S3 path", rerrode `bash scripts/setup_aluno.sh` para garantir os 3 CSVs no bucket, e depois `bash scripts/setup_glue_crawler.sh`.
+
+</blockquote>
+</details>
 
 ### Checkpoint
 
 - [ ] Database `trabalho_final_aluno` existe no Glue
 - [ ] 3 tabelas raw catalogadas (`clientes`, `pedidos`, `pedidos_delta`)
-- [ ] `pedidos.data_pedido` está como `string`
-- [ ] `clientes.ano_nascimento` está como `int` (header detectado)
+- [ ] Schemas em PT (sem `col0..col6` indicando header não detectado)
+- [ ] Script terminou com `[100%] Concluido com sucesso`
 
 ---
 
@@ -377,9 +402,9 @@ A `LOCATION` de cada tabela aponta para `s3://tf-aluno-<ACCOUNT_ID>/iceberg/<ent
 
 ---
 
-<a id="passo-8"></a>
+<a id="passo-6"></a>
 
-**8.** No [console do Athena](https://us-east-1.console.aws.amazon.com/athena/home?region=us-east-1#/landing-page), clique em **Editor de consultas**, selecione o database `trabalho_final_aluno` no painel esquerdo e configure o **Resultado da consulta** para `s3://tf-aluno-<ACCOUNT_ID>/athena-results/` (substitua seu account ID).
+**6.** No [console do Athena](https://us-east-1.console.aws.amazon.com/athena/home?region=us-east-1#/landing-page), clique em **Editor de consultas**, selecione o database `trabalho_final_aluno` no painel esquerdo e configure o **Resultado da consulta** para `s3://tf-aluno-<ACCOUNT_ID>/athena-results/` (substitua seu account ID).
 
 <details>
 <summary><b>💡 Para usuários avançados: rodar SQLs via terminal em vez do console</b></summary>
@@ -399,9 +424,9 @@ Para o trabalho avaliativo, o caminho oficial continua sendo escrever os SQLs do
 </blockquote>
 </details>
 
-<a id="passo-9"></a>
+<a id="passo-7"></a>
 
-**9.** Crie a tabela `clientes_iceberg`. Dica: use `CREATE TABLE` (sem `EXTERNAL`) com `TBLPROPERTIES ('table_type'='iceberg', ...)`. Schema:
+**7.** Crie a tabela `clientes_iceberg`. Dica: use `CREATE TABLE` (sem `EXTERNAL`) com `TBLPROPERTIES ('table_type'='iceberg', ...)`. Schema:
 
 | Coluna | Tipo |
 |--------|------|
@@ -440,9 +465,9 @@ Sem `EXTERNAL`, sem `STORED AS`. O `table_type='iceberg'` é o que faz o Athena 
 </blockquote>
 </details>
 
-<a id="passo-10"></a>
+<a id="passo-8"></a>
 
-**10.** Crie a tabela `pedidos_iceberg` com o schema abaixo. **Atenção**: `data_pedido` é **`DATE`** aqui (não `STRING` como na raw — vamos fazer o `CAST` na carga):
+**8.** Crie a tabela `pedidos_iceberg` com o schema abaixo. **Atenção**: `data_pedido` é **`DATE`** aqui (não `STRING` como na raw — vamos fazer o `CAST` na carga):
 
 | Coluna | Tipo |
 |--------|------|
@@ -482,9 +507,9 @@ Se rodar `SELECT * FROM pedidos_iceberg` agora, deve retornar 0 linhas (a tabela
 
 ---
 
-<a id="passo-11"></a>
+<a id="passo-9"></a>
 
-**11.** Carregue `clientes_iceberg` a partir de `clientes` (a tabela raw) com um `INSERT INTO ... SELECT`. Liste as colunas explicitamente — incluindo `ano_nascimento` — para deixar o contrato visível.
+**9.** Carregue `clientes_iceberg` a partir de `clientes` (a tabela raw) com um `INSERT INTO ... SELECT`. Liste as colunas explicitamente — incluindo `ano_nascimento` — para deixar o contrato visível.
 
 Valide o resultado:
 
@@ -493,9 +518,9 @@ SELECT COUNT(*) FROM trabalho_final_aluno.clientes_iceberg;
 -- esperado: 10000
 ```
 
-<a id="passo-12"></a>
+<a id="passo-10"></a>
 
-**12.** Carregue `pedidos_iceberg` a partir de `pedidos` (a tabela raw). Aqui mora a **conversão de tipo crítica**: o crawler inferiu `data_pedido` como `STRING` (formato `YYYY-MM-DD`), mas a Iceberg está esperando `DATE`. Use:
+**10.** Carregue `pedidos_iceberg` a partir de `pedidos` (a tabela raw). Aqui mora a **conversão de tipo crítica**: o crawler inferiu `data_pedido` como `STRING` (formato `YYYY-MM-DD`), mas a Iceberg está esperando `DATE`. Use:
 
 ```sql
 ... CAST(data_pedido AS DATE) AS data_pedido ...
@@ -552,9 +577,9 @@ valor_final = quantidade * preco_unitario * (1 - desconto) + frete
 
 ---
 
-<a id="passo-13"></a>
+<a id="passo-11"></a>
 
-**13.** Use `ALTER TABLE ... ADD COLUMNS (valor_final DOUBLE)` para adicionar a coluna no schema. Esta operação é **barata em Iceberg** — só altera metadado, não reescreve arquivos de dados.
+**11.** Use `ALTER TABLE ... ADD COLUMNS (valor_final DOUBLE)` para adicionar a coluna no schema. Esta operação é **barata em Iceberg** — só altera metadado, não reescreve arquivos de dados.
 
 <details>
 <summary><b>💡 Clique para entender: ALTER TABLE em Iceberg é metadado</b></summary>
@@ -562,18 +587,18 @@ valor_final = quantidade * preco_unitario * (1 - desconto) + frete
 
 Em Hive externa (data lake puro), adicionar coluna exige reescrever a tabela inteira (ou conviver com `null` em todas as linhas existentes para sempre, sem voltar atrás). Em Iceberg, o schema é versionado no metadado: o `ALTER` cria uma nova versão do schema, e linhas antigas continuam no Parquet original — quando lidas, são "preenchidas" com `null` na coluna nova até serem regravadas.
 
-Por isso o `ALTER` roda em ~5 segundos. Já o `UPDATE` do passo 14 é o que demora — ele varre os 100k registros e regrava arquivos com a coluna materializada.
+Por isso o `ALTER` roda em ~5 segundos. Já o `UPDATE` do passo 12 é o que demora — ele varre os 100k registros e regrava arquivos com a coluna materializada.
 
 </blockquote>
 </details>
 
-<a id="passo-14"></a>
+<a id="passo-12"></a>
 
-**14.** Rode um `UPDATE` que materializa `valor_final` em todas as linhas. Tempo esperado no Athena: **30–60 segundos**.
+**12.** Rode um `UPDATE` que materializa `valor_final` em todas as linhas. Tempo esperado no Athena: **30–60 segundos**.
 
-<a id="passo-15"></a>
+<a id="passo-13"></a>
 
-**15.** Valide:
+**13.** Valide:
 
 ```sql
 SELECT
@@ -627,9 +652,9 @@ flowchart LR
 
 ---
 
-<a id="passo-16"></a>
+<a id="passo-14"></a>
 
-**16.** Crie a tabela intermediária `pedidos_delta_iceberg` via `CREATE TABLE ... AS SELECT` (CTAS) lendo de `pedidos_delta` (a tabela raw). Aplique no `SELECT`:
+**14.** Crie a tabela intermediária `pedidos_delta_iceberg` via `CREATE TABLE ... AS SELECT` (CTAS) lendo de `pedidos_delta` (a tabela raw). Aplique no `SELECT`:
 
 - `CAST(data_pedido AS DATE)` (mesmo motivo da Tarefa 4)
 - `quantidade * preco_unitario * (1 - desconto) + frete AS valor_final`
@@ -672,9 +697,9 @@ SELECT * FROM trabalho_final_aluno.pedidos_delta_iceberg ORDER BY id_pedido;
 -- 2 com id_pedido = O000001/O000002 (updates dos primeiros pedidos, desconto = 0.50 / 0.45)
 ```
 
-<a id="passo-17"></a>
+<a id="passo-15"></a>
 
-**17.** Aplique o `MERGE INTO`. Chave: `id_pedido`. Comportamento:
+**15.** Aplique o `MERGE INTO`. Chave: `id_pedido`. Comportamento:
 
 - `WHEN MATCHED` → `UPDATE SET` todas as colunas de negócio (incluindo `valor_final`)
 - `WHEN NOT MATCHED` → `INSERT` com todas as colunas, incluindo `valor_final`
@@ -695,9 +720,9 @@ A CTAS intermediária resolve os 2: regra de negócio fica num lugar só (a CTAS
 </blockquote>
 </details>
 
-<a id="passo-18"></a>
+<a id="passo-16"></a>
 
-**18.** Valide o resultado:
+**16.** Valide o resultado:
 
 ```sql
 -- 1) total deve ser 100.003 (100k + 3 inserts)
@@ -734,18 +759,18 @@ A tabela `pedidos_iceberg` é compactada (BIN_PACK) e o número de arquivos fís
 
 ---
 
-<a id="passo-19"></a>
+<a id="passo-17"></a>
 
-**19.** Foto **antes** do OPTIMIZE — anote o número de arquivos:
+**17.** Foto **antes** do OPTIMIZE — anote o número de arquivos:
 
 ```sql
 SELECT COUNT(*) AS num_arquivos_antes
 FROM "trabalho_final_aluno"."pedidos_iceberg$files";
 ```
 
-<a id="passo-20"></a>
+<a id="passo-18"></a>
 
-**20.** Rode o OPTIMIZE com estratégia BIN_PACK (default — agrupa arquivos pequenos em arquivos maiores até ~512 MB) e em seguida o VACUUM (limpa snapshots órfãos além do retention default):
+**18.** Rode o OPTIMIZE com estratégia BIN_PACK (default — agrupa arquivos pequenos em arquivos maiores até ~512 MB) e em seguida o VACUUM (limpa snapshots órfãos além do retention default):
 
 ```sql
 OPTIMIZE trabalho_final_aluno.pedidos_iceberg REWRITE DATA USING BIN_PACK;
@@ -766,9 +791,9 @@ Você executou `OPTIMIZE` e `VACUUM` no mesmo painel SQL (Athena considera isso 
 </blockquote>
 </details>
 
-<a id="passo-21"></a>
+<a id="passo-19"></a>
 
-**21.** Foto **depois** do OPTIMIZE:
+**19.** Foto **depois** do OPTIMIZE:
 
 ```sql
 SELECT COUNT(*) AS num_arquivos_depois
@@ -799,9 +824,9 @@ Uma query que devolve **5 linhas** com top 5 clientes por receita líquida total
 
 ---
 
-<a id="passo-22"></a>
+<a id="passo-20"></a>
 
-**22.** Escreva a query: top 5 clientes por `SUM(valor_final)`, com `JOIN` entre `pedidos_iceberg` e `clientes_iceberg`. Colunas:
+**20.** Escreva a query: top 5 clientes por `SUM(valor_final)`, com `JOIN` entre `pedidos_iceberg` e `clientes_iceberg`. Colunas:
 
 | Coluna | Origem |
 |--------|--------|
@@ -819,9 +844,9 @@ Uma query que devolve **5 linhas** com top 5 clientes por receita líquida total
 > [!TIP]
 > Como a tabela `clientes_iceberg` agora tem `ano_nascimento`, você pode opcionalmente enriquecer a query com a idade dos clientes do top 5 (ex: `2024 - ano_nascimento AS idade`) — útil para a Marina entender o perfil dos top compradores. Não é obrigatório, mas conta ponto de maturidade analítica.
 
-<a id="passo-23"></a>
+<a id="passo-21"></a>
 
-**23.** Anote o `id_cliente` do **#1 da lista** e a `receita_total`. Compare com um colega: como o dataset é determinístico (seed=42), os 2 devem ter o **mesmo id_cliente e mesmo valor**.
+**21.** Anote o `id_cliente` do **#1 da lista** e a `receita_total`. Compare com um colega: como o dataset é determinístico (seed=42), os 2 devem ter o **mesmo id_cliente e mesmo valor**.
 
 > [!TIP]
 > Se você e um colega rodarem o trabalho corretamente, o top 5 de vocês é **idêntico até o centavo**. Se diferir, alguém errou um passo (provavelmente o `CAST` na Tarefa 4 ou o MERGE na Tarefa 6). Comparação social vira ferramenta de auto-validação.
@@ -842,9 +867,9 @@ Um arquivo `DECISION.md` (estilo ADR — Architecture Decision Record) defendend
 
 ---
 
-<a id="passo-24"></a>
+<a id="passo-22"></a>
 
-**24.** Crie um arquivo `DECISION.md` na sua pasta de entregáveis do Codespaces, com a estrutura:
+**22.** Crie um arquivo `DECISION.md` na sua pasta de entregáveis do Codespaces, com a estrutura:
 
 ```markdown
 # DECISION — Como evoluir `pedidos_iceberg` se a TPCH crescer 100×
@@ -885,9 +910,9 @@ Bucket S3 vazio e tabelas Glue removidas. Conta AWS limpa, Learner Lab budget pr
 
 ---
 
-<a id="passo-25"></a>
+<a id="passo-23"></a>
 
-**25.** Limpe os recursos. **Esta etapa é obrigatória** — esquecer de limpar consome budget do Learner Lab.
+**23.** Limpe os recursos. **Esta etapa é obrigatória** — esquecer de limpar consome budget do Learner Lab.
 
 ```bash
 # Esvazia o bucket (necessario antes de deletar)
@@ -900,7 +925,7 @@ aws s3 rb "s3://tf-aluno-$(aws sts get-caller-identity --query Account --output 
 E no console Glue:
 
 1. **Databases** → `trabalho_final_aluno` → **Action → Delete database** (apaga tabelas e database juntos).
-2. **Crawlers** → `tf-aluno-crawler` → **Action → Delete**.
+2. **Crawlers** → `crawler-trabalho-final-aluno` → **Action → Delete**.
 
 > [!CAUTION]
 > Confirme que o bucket sumiu com `aws s3 ls | grep tf-aluno`. Se ainda aparecer, repita o `rb`. Bucket vazio também cobra (storage de logs e metadados de versionamento), então **delete tudo**, não só esvazie.
@@ -946,7 +971,7 @@ Se você chegou até aqui, então entregou:
 
 Antes de abrir issue/perguntar no Slack, colete estas 4 informações:
 
-1. **Em que passo você está** (ex: "passo 17, rodando o `MERGE INTO`")
+1. **Em que passo você está** (ex: "passo 15, rodando o `MERGE INTO`")
 2. **Mensagem de erro literal** (copia-cola completo do painel de query do Athena)
 3. **Saída de** `SELECT operation, count(*) FROM "trabalho_final_aluno"."pedidos_iceberg$snapshots" GROUP BY operation;` (mostra histórico de operações)
 4. **O que você já tentou**
